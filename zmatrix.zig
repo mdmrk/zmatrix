@@ -2,6 +2,8 @@ const std = @import("std");
 const print = std.debug.print;
 const builtin = @import("builtin");
 
+const zmatrix_options = @import("zmatrix_options");
+
 const windows = builtin.os.tag == .windows;
 const linux = !windows;
 
@@ -18,6 +20,11 @@ var spaces: []u32 = &.{};
 var lengths: []u32 = &.{};
 var updates: []u32 = &.{};
 var current_size: TermSize = .{ .width = 0, .height = 0 };
+
+var args: struct {
+    help: bool = false,
+    version: bool = false,
+} = .{};
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
@@ -59,6 +66,26 @@ const AnsiEscapeCodes = struct {
     const term_on = screen_buf_on ++ cursor_hide ++ cursor_home ++ screen_clear ++ color_def;
     const term_off = screen_buf_off ++ cursor_show ++ nl;
 };
+
+fn parseArgs(alloc: std.mem.Allocator) !void {
+    var args_it = try std.process.argsWithAllocator(alloc);
+    defer args_it.deinit();
+
+    const S = struct {
+        inline fn checkArg(arg: []const u8, comptime short: []const u8, comptime long: []const u8) bool {
+            return std.mem.eql(u8, arg, short) or std.mem.eql(u8, arg, long);
+        }
+    };
+
+    _ = args_it.skip();
+    while (args_it.next()) |arg| {
+        if (S.checkArg(arg, "-h", "--help")) {
+            args.help = true;
+        } else if (S.checkArg(arg, "-v", "--version")) {
+            args.version = true;
+        }
+    }
+}
 
 fn getTerminalSize() !TermSize {
     if (windows) {
@@ -240,13 +267,20 @@ fn checkResize(alloc: std.mem.Allocator) !bool {
 }
 
 pub fn main() !void {
+    const alloc = gpa.allocator();
+    try parseArgs(alloc);
+
+    if (args.version) {
+        print("{s}\n", .{zmatrix_options.version});
+        return;
+    }
+
     prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
         try std.posix.getrandom(std.mem.asBytes(&seed));
         break :blk seed;
     });
     rand = prng.random();
-    const alloc = gpa.allocator();
 
     const term_size = try getTerminalSize();
 
