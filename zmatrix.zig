@@ -14,9 +14,10 @@ var g_tty_win: std.os.windows.HANDLE = undefined;
 
 var matrix: [][]Matrix = undefined;
 var prev_matrix: [][]Matrix = undefined;
-var spaces: []usize = undefined;
-var lengths: []usize = undefined;
-var updates: []usize = undefined;
+var spaces: []usize = &.{};
+var lengths: []usize = &.{};
+var updates: []usize = &.{};
+var current_size: TermSize = .{ .width = 0, .height = 0 };
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
@@ -102,6 +103,51 @@ fn getTerminalSize() !TermSize {
     }
 }
 
+fn deallocateMatrix(alloc: std.mem.Allocator, mat: [][]Matrix) void {
+    for (mat) |row| {
+        alloc.free(row);
+    }
+    alloc.free(mat);
+}
+
+fn allocateMatrix(alloc: std.mem.Allocator, width: usize, height: usize) ![][]Matrix {
+    const mat = try alloc.alloc([]Matrix, height + 1);
+    errdefer {
+        for (mat[0..height]) |row| {
+            alloc.free(row);
+        }
+        alloc.free(mat);
+    }
+
+    for (mat) |*row| {
+        row.* = try alloc.alloc(Matrix, width);
+        for (row.*) |*cell| {
+            cell.* = .{ .is_head = false, .val = -1, .color = 0 };
+        }
+    }
+    return mat;
+}
+
+fn initializeColumns(alloc: std.mem.Allocator, width: usize, height: usize) !void {
+    if (spaces.len > 0) {
+        alloc.free(spaces);
+        alloc.free(lengths);
+        alloc.free(updates);
+    }
+
+    spaces = try alloc.alloc(usize, width);
+    lengths = try alloc.alloc(usize, width);
+    updates = try alloc.alloc(usize, width);
+
+    var j: usize = 0;
+    while (j <= width - 1) : (j += 1) {
+        spaces[j] = rand.uintLessThan(usize, height) + 1;
+        lengths[j] = rand.uintLessThan(usize, height - 3) + 3;
+        if (j < matrix[1].len) matrix[1][j].val = ' ';
+        updates[j] = rand.uintLessThan(usize, 3) + 1;
+    }
+}
+
 fn renderFrame(alloc: std.mem.Allocator, term_size: TermSize, buffer: *std.ArrayList(u8)) !void {
     buffer.clearRetainingCapacity();
 
@@ -168,6 +214,31 @@ fn copyMatrix(src: [][]Matrix, dst: [][]Matrix) void {
     }
 }
 
+fn checkResize(alloc: std.mem.Allocator) !bool {
+    const new_size = try getTerminalSize();
+    if (new_size.width != current_size.width or new_size.height != current_size.height) {
+        if (current_size.width > 0) {
+            deallocateMatrix(alloc, matrix);
+            deallocateMatrix(alloc, prev_matrix);
+        }
+
+        matrix = try allocateMatrix(alloc, new_size.width, new_size.height);
+        prev_matrix = try allocateMatrix(alloc, new_size.width, new_size.height);
+
+        try initializeColumns(alloc, new_size.width, new_size.height);
+
+        current_size = new_size;
+
+        print("{s}{s}", .{
+            AnsiEscapeCodes.screen_clear,
+            AnsiEscapeCodes.cursor_home,
+        });
+
+        return true;
+    }
+    return false;
+}
+
 pub fn main() !void {
     prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
@@ -182,8 +253,9 @@ pub fn main() !void {
     buf = try alloc.alloc(u8, term_size.width * term_size.height * 4);
     stdout_writer = std.fs.File.stdout().writer(buf);
 
-    matrix = try alloc.alloc([]Matrix, term_size.height + 1);
-    prev_matrix = try alloc.alloc([]Matrix, term_size.height + 1);
+    current_size = try getTerminalSize();
+    matrix = try allocateMatrix(alloc, current_size.width, current_size.height);
+    prev_matrix = try allocateMatrix(alloc, current_size.width, current_size.height);
 
     for (matrix, prev_matrix) |*row, *prev_row| {
         row.* = try alloc.alloc(Matrix, term_size.width);
@@ -195,17 +267,7 @@ pub fn main() !void {
         }
     }
 
-    spaces = try alloc.alloc(usize, term_size.width);
-    lengths = try alloc.alloc(usize, term_size.width);
-    updates = try alloc.alloc(usize, term_size.width);
-
-    var j: usize = 0;
-    while (j <= term_size.width - 1) : (j += 1) {
-        spaces[j] = rand.uintLessThan(usize, term_size.height) + 1;
-        lengths[j] = rand.uintLessThan(usize, term_size.height - 3) + 3;
-        matrix[1][j].val = ' ';
-        updates[j] = rand.uintLessThan(usize, 3) + 1;
-    }
+    try initializeColumns(alloc, current_size.width, current_size.height);
 
     print("{s}", .{AnsiEscapeCodes.term_on});
     defer print("{s}", .{AnsiEscapeCodes.term_off});
@@ -220,6 +282,11 @@ pub fn main() !void {
     var use_diff_rendering = false;
 
     while (true) {
+        const resized = try checkResize(alloc);
+        if (resized) {
+            use_diff_rendering = false;
+        }
+
         count += 1;
         if (count > 4) count = 1;
 
@@ -227,16 +294,16 @@ pub fn main() !void {
             copyMatrix(matrix, prev_matrix);
         }
 
-        j = 0;
-        while (j <= term_size.width - 1) : (j += 2) {
+        var j: usize = 0;
+        while (j <= current_size.width - 1) : (j += 2) {
             if (count > updates[j]) continue;
 
             if (matrix[0][j].val == -1 and matrix[1][j].val == ' ' and spaces[j] > 0) {
                 spaces[j] -= 1;
             } else if (matrix[0][j].val == -1 and matrix[1][j].val == ' ') {
-                lengths[j] = rand.uintLessThan(usize, term_size.height - 3) + 3;
+                lengths[j] = rand.uintLessThan(usize, current_size.height - 3) + 3;
                 matrix[0][j].val = @intCast(rand.uintLessThan(u32, randnum) + randmin);
-                spaces[j] = rand.uintLessThan(usize, term_size.height) + 1;
+                spaces[j] = rand.uintLessThan(usize, current_size.height) + 1;
             }
 
             var i: usize = 0;
@@ -244,20 +311,20 @@ pub fn main() !void {
             var z: usize = 0;
             var firstcoldone: bool = false;
 
-            while (i <= term_size.height) {
-                while (i <= term_size.height and (matrix[i][j].val == ' ' or matrix[i][j].val == -1)) {
+            while (i <= current_size.height) {
+                while (i <= current_size.height and (matrix[i][j].val == ' ' or matrix[i][j].val == -1)) {
                     i += 1;
                 }
-                if (i > term_size.height) break;
+                if (i > current_size.height) break;
 
                 z = i;
                 y = 0;
-                while (i <= term_size.height and (matrix[i][j].val != ' ' and matrix[i][j].val != -1)) {
+                while (i <= current_size.height and (matrix[i][j].val != ' ' and matrix[i][j].val != -1)) {
                     matrix[i][j].is_head = false;
                     i += 1;
                     y += 1;
                 }
-                if (i > term_size.height) {
+                if (i > current_size.height) {
                     matrix[z][j].val = ' ';
                     continue;
                 }
@@ -275,9 +342,9 @@ pub fn main() !void {
         }
 
         if (use_diff_rendering) {
-            try renderFrameDiff(alloc, term_size, &frame_buffer);
+            try renderFrameDiff(alloc, current_size, &frame_buffer);
         } else {
-            try renderFrame(alloc, term_size, &frame_buffer);
+            try renderFrame(alloc, current_size, &frame_buffer);
             print("{s}", .{AnsiEscapeCodes.cursor_home});
             use_diff_rendering = true;
         }
@@ -285,6 +352,6 @@ pub fn main() !void {
         _ = try stdout_writer.interface.write(frame_buffer.items);
         try stdout_writer.interface.flush();
 
-        std.Thread.sleep(80_000_000);
+        std.Thread.sleep(40_000_000);
     }
 }
