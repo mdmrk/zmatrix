@@ -8,10 +8,12 @@ const linux = !windows;
 var prng: std.Random.DefaultPrng = undefined;
 var rand: std.Random = undefined;
 
-var stdout: std.fs.File.Writer = undefined;
+var stdout_writer: std.fs.File.Writer = undefined;
+var buf: []u8 = undefined;
 var g_tty_win: std.os.windows.HANDLE = undefined;
 
 var matrix: [][]Matrix = undefined;
+var prev_matrix: [][]Matrix = undefined;
 var spaces: []usize = undefined;
 var lengths: []usize = undefined;
 var updates: []usize = undefined;
@@ -21,6 +23,12 @@ var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const Matrix = struct {
     val: i32,
     is_head: bool,
+    color: u8,
+};
+
+const TermSize = struct {
+    width: usize,
+    height: usize,
 };
 
 const AnsiEscapeCodes = struct {
@@ -30,12 +38,17 @@ const AnsiEscapeCodes = struct {
     const cursor_show = csi ++ "?25h";
     const cursor_hide = csi ++ "?25l";
     const cursor_home = csi ++ "1;1H";
+    const cursor_pos = csi ++ "{d};{d}H";
 
     const color_fg = "38;5;";
     const color_bg = "48;5;";
     const color_fg_def = csi ++ color_fg ++ "15m";
     const color_bg_def = csi ++ color_bg ++ "0m";
     const color_def = color_fg_def;
+
+    const color_bright_green = csi ++ "38;5;46m";
+    const color_green = csi ++ "38;5;34m";
+    const color_dark_green = csi ++ "38;5;22m";
 
     const screen_clear = csi ++ "2J";
     const screen_buf_on = csi ++ "?1049h";
@@ -46,7 +59,7 @@ const AnsiEscapeCodes = struct {
     const term_off = screen_buf_off ++ cursor_show ++ nl;
 };
 
-fn getTerminalSize() !struct { width: usize, height: usize } {
+fn getTerminalSize() !TermSize {
     if (windows) {
         var info: std.os.windows.CONSOLE_SCREEN_BUFFER_INFO = .{
             .dwSize = .{ .X = 0, .Y = 0 },
@@ -89,6 +102,72 @@ fn getTerminalSize() !struct { width: usize, height: usize } {
     }
 }
 
+fn renderFrame(alloc: std.mem.Allocator, term_size: TermSize, buffer: *std.ArrayList(u8)) !void {
+    buffer.clearRetainingCapacity();
+
+    for (1..term_size.height + 1) |i| {
+        for (0..term_size.width) |j| {
+            const cell = matrix[i][j];
+
+            if (cell.val == -1) {
+                try buffer.append(alloc, ' ');
+            } else if (cell.val == ' ') {
+                try buffer.append(alloc, ' ');
+            } else {
+                if (cell.is_head) {
+                    try buffer.appendSlice(alloc, AnsiEscapeCodes.color_bright_green);
+                } else {
+                    try buffer.appendSlice(alloc, AnsiEscapeCodes.color_green);
+                }
+
+                try buffer.append(alloc, @as(u8, @intCast(cell.val)));
+                try buffer.appendSlice(alloc, AnsiEscapeCodes.color_def);
+            }
+        }
+        if (i < term_size.height) {
+            try buffer.append(alloc, '\n');
+        }
+    }
+}
+
+fn renderFrameDiff(alloc: std.mem.Allocator, term_size: TermSize, buffer: *std.ArrayList(u8)) !void {
+    buffer.clearRetainingCapacity();
+
+    for (1..term_size.height + 1) |i| {
+        for (0..term_size.width) |j| {
+            const curr = matrix[i][j];
+            const prev = prev_matrix[i][j];
+
+            if (curr.val != prev.val or curr.is_head != prev.is_head) {
+                try buffer.writer(alloc).print("\x1B[{d};{d}H", .{ i, j + 1 });
+
+                if (curr.val == -1) {
+                    try buffer.append(alloc, ' ');
+                } else if (curr.val == ' ') {
+                    try buffer.append(alloc, ' ');
+                } else {
+                    if (curr.is_head) {
+                        try buffer.appendSlice(alloc, AnsiEscapeCodes.color_bright_green);
+                    } else {
+                        try buffer.appendSlice(alloc, AnsiEscapeCodes.color_green);
+                    }
+
+                    try buffer.append(alloc, @as(u8, @intCast(curr.val)));
+                    try buffer.appendSlice(alloc, AnsiEscapeCodes.color_def);
+                }
+            }
+        }
+    }
+}
+
+fn copyMatrix(src: [][]Matrix, dst: [][]Matrix) void {
+    for (src, dst) |src_row, dst_row| {
+        for (src_row, dst_row) |src_cell, *dst_cell| {
+            dst_cell.* = src_cell;
+        }
+    }
+}
+
 pub fn main() !void {
     prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
@@ -100,11 +179,19 @@ pub fn main() !void {
 
     const term_size = try getTerminalSize();
 
+    buf = try alloc.alloc(u8, term_size.width * term_size.height * 4);
+    stdout_writer = std.fs.File.stdout().writer(buf);
+
     matrix = try alloc.alloc([]Matrix, term_size.height + 1);
-    for (matrix) |*row| {
+    prev_matrix = try alloc.alloc([]Matrix, term_size.height + 1);
+
+    for (matrix, prev_matrix) |*row, *prev_row| {
         row.* = try alloc.alloc(Matrix, term_size.width);
-        for (row.*) |*cell| {
-            cell.* = .{ .is_head = false, .val = -1 };
+        prev_row.* = try alloc.alloc(Matrix, term_size.width);
+
+        for (row.*, prev_row.*) |*cell, *prev_cell| {
+            cell.* = .{ .is_head = false, .val = -1, .color = 0 };
+            prev_cell.* = .{ .is_head = false, .val = -1, .color = 0 };
         }
     }
 
@@ -120,13 +207,25 @@ pub fn main() !void {
         updates[j] = rand.uintLessThan(usize, 3) + 1;
     }
 
+    print("{s}", .{AnsiEscapeCodes.term_on});
+    defer print("{s}", .{AnsiEscapeCodes.term_off});
+
     const randmin = 33;
     const randnum = 90;
 
+    var frame_buffer = try std.ArrayList(u8).initCapacity(alloc, 0);
+    defer frame_buffer.deinit(alloc);
+
     var count: usize = 0;
+    var use_diff_rendering = false;
+
     while (true) {
         count += 1;
         if (count > 4) count = 1;
+
+        if (use_diff_rendering) {
+            copyMatrix(matrix, prev_matrix);
+        }
 
         j = 0;
         while (j <= term_size.width - 1) : (j += 2) {
@@ -175,20 +274,17 @@ pub fn main() !void {
             }
         }
 
-        print("{s}", .{AnsiEscapeCodes.term_on});
-        defer print("{s}", .{AnsiEscapeCodes.term_off});
-        for (1..term_size.height + 1) |i| {
-            j = 0;
-            while (j <= term_size.width - 1) : (j += 1) {
-                if (matrix[i][j].val == -1) {
-                    print(" ", .{});
-                } else {
-                    print("{c}", .{@as(u8, @intCast(matrix[i][j].val))});
-                }
-            }
-            print("\n", .{});
+        if (use_diff_rendering) {
+            try renderFrameDiff(alloc, term_size, &frame_buffer);
+        } else {
+            try renderFrame(alloc, term_size, &frame_buffer);
+            print("{s}", .{AnsiEscapeCodes.cursor_home});
+            use_diff_rendering = true;
         }
 
-        std.Thread.sleep(40_000_000);
+        _ = try stdout_writer.interface.write(frame_buffer.items);
+        try stdout_writer.interface.flush();
+
+        std.Thread.sleep(80_000_000);
     }
 }
