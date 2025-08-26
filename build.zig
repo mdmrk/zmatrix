@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("zmatrix.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = optimize == .ReleaseFast,
         }),
     });
 
