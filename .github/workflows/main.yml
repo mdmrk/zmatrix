@@ -47,7 +47,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: master
+          version: '0.15.1'
       - name: Build
         env:
           BUILD_DATE: ${{needs.build-info.outputs.date}}
@@ -56,7 +56,7 @@ jobs:
           zig build -Dtarget=${{ matrix.target.arch }}-${{ matrix.target.os }} -Doptimize=ReleaseSafe -Dcpu=baseline
         shell: bash
       - name: Upload Artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: zmatrix-${{ matrix.target.os }}-${{ matrix.target.arch }}
           path: zig-out/bin/zmatrix${{ matrix.target.os == 'windows' && '.exe' || '' }}
