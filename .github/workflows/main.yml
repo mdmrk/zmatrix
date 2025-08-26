@@ -1,0 +1,108 @@
+name: ci
+permissions:
+  contents: write
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+jobs:
+  build-info:
+    runs-on: ubuntu-latest
+    outputs:
+      date: ${{ steps.info.outputs.date }}
+      commit_hash: ${{ steps.info.outputs.commit_hash }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Get build info
+        id: info
+        shell: bash
+        run: |
+          echo "date=$(date +'%Y%m%d')" >> "$GITHUB_OUTPUT"
+          echo "commit_hash=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+  build:
+    needs: build-info
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [
+          { os: 'windows', arch: 'x86_64' },
+          { os: 'windows', arch: 'aarch64' },
+          { os: 'macos', arch: 'x86_64' },
+          { os: 'macos', arch: 'aarch64' },
+          { os: 'linux', arch: 'x86_64' },
+          { os: 'linux', arch: 'aarch64' },
+          { os: 'linux', arch: 'riscv64' },
+          { os: 'freebsd', arch: 'x86_64' },
+          { os: 'freebsd', arch: 'aarch64' },
+          { os: 'freebsd', arch: 'riscv64' },
+          { os: 'netbsd', arch: 'x86_64' },
+          { os: 'netbsd', arch: 'aarch64' },
+        ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: master
+      - name: Build
+        env:
+          BUILD_DATE: ${{needs.build-info.outputs.date}}
+          COMMIT_HASH: ${{needs.build-info.outputs.commit_hash}}
+        run: |
+          zig build -Dtarget=${{ matrix.target.arch }}-${{ matrix.target.os }} -Doptimize=ReleaseSafe -Dcpu=baseline
+        shell: bash
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: zmatrix-${{ matrix.target.os }}-${{ matrix.target.arch }}
+          path: zig-out/bin/zmatrix${{ matrix.target.os == 'windows' && '.exe' || '' }}
+  release:
+    needs: [build-info, build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+      - name: Prepare Release Files
+        run: |
+          cd artifacts
+          for dir in */; do
+            if [ -f "$dir/zmatrix.exe" ]; then
+              (cd "$dir" && zip "../${dir%/}.zip" zmatrix.exe)
+            elif [ -f "$dir/zmatrix" ]; then
+              (cd "$dir" && zip "../${dir%/}.zip" zmatrix)
+            fi
+          done
+      - name: Delete all existing releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          api_url="https://api.github.com/repos/${{ github.repository }}/releases"
+          
+          releases=$(curl -H "Authorization: token $GITHUB_TOKEN" "$api_url")
+          
+          echo "$releases" | jq -c '.[]' | while read -r release; do
+            release_id=$(echo "$release" | jq -r '.id')
+            release_tag=$(echo "$release" | jq -r '.tag_name')
+            
+            echo "Deleting release: $release_id with tag: $release_tag"
+            curl -X DELETE -H "Authorization: token $GITHUB_TOKEN" "$api_url/$release_id"
+            curl -X DELETE -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$release_tag"
+          done
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: "zmatrix-${{ needs.build-info.outputs.date }}-${{ needs.build-info.outputs.commit_hash }}"
+          tag: "zmatrix-${{ needs.build-info.outputs.date }}-${{ needs.build-info.outputs.commit_hash }}"
+          draft: false
+          prerelease: false
+          artifacts: "artifacts/*.zip"
+          body: |
+            Automated release for zmatrix
