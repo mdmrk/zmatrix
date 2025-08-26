@@ -99,7 +99,7 @@ fn getTerminalSize() !TermSize {
 
         if (std.os.windows.kernel32.GetConsoleScreenBufferInfo(g_tty_win, &info) == 0) {
             switch (std.os.windows.kernel32.GetLastError()) {
-                _ => |e| return std.os.windows.unexpectedError(e),
+                else => |e| return std.os.windows.unexpectedError(e),
             }
         }
 
