@@ -14,9 +14,9 @@ var g_tty_win: std.os.windows.HANDLE = undefined;
 
 var matrix: [][]Matrix = undefined;
 var prev_matrix: [][]Matrix = undefined;
-var spaces: []usize = &.{};
-var lengths: []usize = &.{};
-var updates: []usize = &.{};
+var spaces: []u32 = &.{};
+var lengths: []u32 = &.{};
+var updates: []u32 = &.{};
 var current_size: TermSize = .{ .width = 0, .height = 0 };
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -28,8 +28,8 @@ const Matrix = struct {
 };
 
 const TermSize = struct {
-    width: usize,
-    height: usize,
+    width: u32,
+    height: u32,
 };
 
 const AnsiEscapeCodes = struct {
@@ -110,7 +110,7 @@ fn deallocateMatrix(alloc: std.mem.Allocator, mat: [][]Matrix) void {
     alloc.free(mat);
 }
 
-fn allocateMatrix(alloc: std.mem.Allocator, width: usize, height: usize) ![][]Matrix {
+fn allocateMatrix(alloc: std.mem.Allocator, width: u32, height: u32) ![][]Matrix {
     const mat = try alloc.alloc([]Matrix, height + 1);
     errdefer {
         for (mat[0..height]) |row| {
@@ -128,23 +128,23 @@ fn allocateMatrix(alloc: std.mem.Allocator, width: usize, height: usize) ![][]Ma
     return mat;
 }
 
-fn initializeColumns(alloc: std.mem.Allocator, width: usize, height: usize) !void {
+fn initializeColumns(alloc: std.mem.Allocator, width: u32, height: u32) !void {
     if (spaces.len > 0) {
         alloc.free(spaces);
         alloc.free(lengths);
         alloc.free(updates);
     }
 
-    spaces = try alloc.alloc(usize, width);
-    lengths = try alloc.alloc(usize, width);
-    updates = try alloc.alloc(usize, width);
+    spaces = try alloc.alloc(u32, width);
+    lengths = try alloc.alloc(u32, width);
+    updates = try alloc.alloc(u32, width);
 
-    var j: usize = 0;
+    var j: u32 = 0;
     while (j <= width - 1) : (j += 1) {
-        spaces[j] = rand.uintLessThan(usize, height) + 1;
-        lengths[j] = rand.uintLessThan(usize, height - 3) + 3;
+        spaces[j] = rand.uintLessThan(u32, height) + 1;
+        lengths[j] = rand.uintLessThan(u32, height - 3) + 3;
         if (j < matrix[1].len) matrix[1][j].val = ' ';
-        updates[j] = rand.uintLessThan(usize, 3) + 1;
+        updates[j] = rand.uintLessThan(u32, 3) + 1;
     }
 }
 
@@ -278,7 +278,7 @@ pub fn main() !void {
     var frame_buffer = try std.ArrayList(u8).initCapacity(alloc, 0);
     defer frame_buffer.deinit(alloc);
 
-    var count: usize = 0;
+    var count: u32 = 0;
     var use_diff_rendering = false;
 
     while (true) {
@@ -294,21 +294,21 @@ pub fn main() !void {
             copyMatrix(matrix, prev_matrix);
         }
 
-        var j: usize = 0;
+        var j: u32 = 0;
         while (j <= current_size.width - 1) : (j += 2) {
             if (count > updates[j]) continue;
 
             if (matrix[0][j].val == -1 and matrix[1][j].val == ' ' and spaces[j] > 0) {
                 spaces[j] -= 1;
             } else if (matrix[0][j].val == -1 and matrix[1][j].val == ' ') {
-                lengths[j] = rand.uintLessThan(usize, current_size.height - 3) + 3;
+                lengths[j] = rand.uintLessThan(u32, current_size.height - 3) + 3;
                 matrix[0][j].val = @intCast(rand.uintLessThan(u32, randnum) + randmin);
-                spaces[j] = rand.uintLessThan(usize, current_size.height) + 1;
+                spaces[j] = rand.uintLessThan(u32, current_size.height) + 1;
             }
 
-            var i: usize = 0;
-            var y: usize = 0;
-            var z: usize = 0;
+            var i: u32 = 0;
+            var y: u32 = 0;
+            var z: u32 = 0;
             var firstcoldone: bool = false;
 
             while (i <= current_size.height) {
