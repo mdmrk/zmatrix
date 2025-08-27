@@ -5,7 +5,6 @@ const builtin = @import("builtin");
 const zmatrix_options = @import("zmatrix_options");
 
 const windows = builtin.os.tag == .windows;
-const linux = !windows;
 
 var prng: std.Random.DefaultPrng = undefined;
 var rand: std.Random = undefined;
@@ -270,6 +269,19 @@ pub fn main() !void {
     const alloc = gpa.allocator();
     try parseArgs(alloc);
 
+    if (args.help) {
+        std.debug.print(
+            \\zmatrix - Matrix on the terminal
+            \\
+            \\Usage: zmatrix [options]
+            \\
+            \\    Options:
+            \\        --version, -v   Print version string
+            \\        --help, -h      Print this message
+            \\
+        , .{});
+        return;
+    }
     if (args.version) {
         print("{s}\n", .{zmatrix_options.version});
         return;
