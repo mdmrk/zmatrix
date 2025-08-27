@@ -11,7 +11,8 @@ var rand: std.Random = undefined;
 
 var stdout_writer: std.fs.File.Writer = undefined;
 var buf: []u8 = undefined;
-var g_tty_win: std.os.windows.HANDLE = undefined;
+var tty_win: std.os.windows.HANDLE = undefined;
+var tty_nix: std.fs.File = undefined;
 
 var matrix: [][]Matrix = undefined;
 var prev_matrix: [][]Matrix = undefined;
@@ -19,6 +20,7 @@ var spaces: []u32 = &.{};
 var lengths: []u32 = &.{};
 var updates: []u32 = &.{};
 var current_size: TermSize = .{ .width = 0, .height = 0 };
+var update_time: u64 = 40_000_000;
 
 var args: struct {
     help: bool = false,
@@ -96,7 +98,7 @@ fn getTerminalSize() !TermSize {
             .dwMaximumWindowSize = .{ .X = 0, .Y = 0 },
         };
 
-        if (std.os.windows.kernel32.GetConsoleScreenBufferInfo(g_tty_win, &info) == 0) {
+        if (std.os.windows.kernel32.GetConsoleScreenBufferInfo(tty_win, &info) == 0) {
             switch (std.os.windows.kernel32.GetLastError()) {
                 else => |e| return std.os.windows.unexpectedError(e),
             }
@@ -111,11 +113,8 @@ fn getTerminalSize() !TermSize {
         const winsz = std.c.winsize{ .col = 0, .row = 0, .xpixel = 0, .ypixel = 0 };
 
         if (winsz.row == 0 or winsz.col == 0) {
-            var lldb_tty_nix = try std.fs.cwd().openFile("/dev/tty", .{});
-            defer lldb_tty_nix.close();
-
             var lldb_winsz = std.c.winsize{ .col = 0, .row = 0, .xpixel = 0, .ypixel = 0 };
-            const lldb_rv = std.os.linux.ioctl(lldb_tty_nix.handle, TIOCGWINSZ, @intFromPtr(&lldb_winsz));
+            const lldb_rv = std.os.linux.ioctl(tty_nix.handle, TIOCGWINSZ, @intFromPtr(&lldb_winsz));
             const lldb_err = std.posix.errno(lldb_rv);
 
             if (lldb_rv >= 0) {
@@ -265,6 +264,90 @@ fn checkResize(alloc: std.mem.Allocator) !bool {
     return false;
 }
 
+fn kbhit() bool {
+    const fd = if (windows)
+        @as(std.os.windows.ws2_32.SOCKET, @ptrCast(std.os.windows.kernel32.GetStdHandle(std.os.windows.STD_INPUT_HANDLE)))
+    else
+        std.posix.STDIN_FILENO;
+    const fds: std.posix.pollfd = .{
+        .fd = fd,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    };
+    return std.posix.poll(@constCast(&[_]std.posix.pollfd{fds}), 0) catch 0 > 0;
+}
+
+fn getch() !u8 {
+    var buffer: [1]u8 = undefined;
+    const fd = if (windows)
+        @as(std.os.windows.ws2_32.SOCKET, @ptrCast(std.os.windows.kernel32.GetStdHandle(std.os.windows.STD_INPUT_HANDLE)))
+    else
+        std.posix.STDIN_FILENO;
+    const bytes_read = try std.posix.read(fd, &buffer);
+    if (bytes_read > 0) {
+        return buffer[0];
+    }
+    return error.NoInput;
+}
+
+fn handle_keypress(key: u8) void {
+    switch (key) {
+        '0' => {
+            update_time = 4_000;
+        },
+        '1' => {
+            update_time = 4_000_0;
+        },
+        '2' => {
+            update_time = 4_000_00;
+        },
+        '3' => {
+            update_time = 4_000_000;
+        },
+        '4' => {
+            update_time = 4_000_000_0;
+        },
+        '5' => {
+            update_time = 4_000_000_00;
+        },
+        '6' => {
+            update_time = 4_000_000_000;
+        },
+        '7' => {
+            update_time = 4_000_000_000_0;
+        },
+        '8' => {
+            update_time = 4_000_000_000_00;
+        },
+        '9' => {
+            update_time = 4_000_000_000_000;
+        },
+        else => {},
+    }
+}
+
+fn setupTty() !void {
+    if (windows) {} else {
+        const original_termios = try std.posix.tcgetattr(tty_nix.handle);
+        var raw = original_termios;
+
+        raw.lflag.ECHO = false;
+        raw.lflag.ICANON = false;
+        raw.lflag.IEXTEN = false;
+        raw.iflag.IXON = false;
+        raw.iflag.ICRNL = false;
+        raw.iflag.BRKINT = false;
+        raw.iflag.INPCK = false;
+        raw.iflag.ISTRIP = false;
+        raw.oflag.OPOST = false;
+        raw.cflag.CSIZE = .CS8;
+        raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
+        raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+
+        try std.posix.tcsetattr(tty_nix.handle, .FLUSH, raw);
+    }
+}
+
 pub fn main() !void {
     const alloc = gpa.allocator();
     try parseArgs(alloc);
@@ -294,6 +377,16 @@ pub fn main() !void {
     });
     rand = prng.random();
 
+    if (!windows) {
+        tty_nix = try std.fs.cwd().openFile("/dev/tty", .{});
+    }
+    defer {
+        if (!windows) {
+            tty_nix.close();
+        }
+    }
+
+    try setupTty();
     const term_size = try getTerminalSize();
 
     buf = try alloc.alloc(u8, term_size.width * term_size.height * 4);
@@ -335,6 +428,14 @@ pub fn main() !void {
 
         count += 1;
         if (count > 4) count = 1;
+
+        if (kbhit()) {
+            const key = getch() catch continue;
+            if (key == 'q' or key == 'Q') {
+                break;
+            }
+            handle_keypress(key);
+        }
 
         if (use_diff_rendering) {
             copyMatrix(matrix, prev_matrix);
@@ -398,6 +499,6 @@ pub fn main() !void {
         _ = try stdout_writer.interface.write(frame_buffer.items);
         try stdout_writer.interface.flush();
 
-        std.Thread.sleep(40_000_000);
+        std.Thread.sleep(update_time);
     }
 }
