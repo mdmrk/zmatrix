@@ -11,15 +11,13 @@ var rand: std.Random = undefined;
 
 var stdout_writer: std.fs.File.Writer = undefined;
 var buf: []u8 = undefined;
-var tty_win: std.os.windows.HANDLE = undefined;
-var tty_nix: std.fs.File = undefined;
 
 var matrix: [][]Matrix = undefined;
 var prev_matrix: [][]Matrix = undefined;
 var spaces: []u32 = &.{};
 var lengths: []u32 = &.{};
 var updates: []u32 = &.{};
-var current_size: TermSize = .{ .width = 0, .height = 0 };
+var current_size: TtySize = .{ .width = 0, .height = 0 };
 var update_time: u64 = 40_000_000;
 
 var args: struct {
@@ -35,9 +33,90 @@ const Matrix = struct {
     color: u8,
 };
 
-const TermSize = struct {
+const TtySize = struct {
     width: u32,
     height: u32,
+};
+
+const Tty = struct {
+    win: std.os.windows.HANDLE = undefined,
+    nix: std.fs.File = undefined,
+
+    pub fn init() !Tty {
+        if (windows) {
+            return .{
+                .win = std.fs.File.stdin().handle,
+            };
+        } else {
+            const tty_nix = try std.fs.cwd().openFile("/dev/tty", .{});
+            const original_termios = try std.posix.tcgetattr(tty_nix.handle);
+            var raw = original_termios;
+
+            raw.lflag.ECHO = false;
+            raw.lflag.ICANON = false;
+            raw.lflag.IEXTEN = false;
+            raw.iflag.IXON = false;
+            raw.iflag.ICRNL = false;
+            raw.iflag.BRKINT = false;
+            raw.iflag.INPCK = false;
+            raw.iflag.ISTRIP = false;
+            raw.oflag.OPOST = false;
+            raw.cflag.CSIZE = .CS8;
+            raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
+            raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+
+            try std.posix.tcsetattr(tty_nix.handle, .FLUSH, raw);
+            return .{
+                .nix = tty_nix,
+            };
+        }
+    }
+
+    pub fn getSize(self: *const Tty) !TtySize {
+        if (windows) {
+            var info: std.os.windows.CONSOLE_SCREEN_BUFFER_INFO = .{
+                .dwSize = .{ .X = 0, .Y = 0 },
+                .dwCursorPosition = .{ .X = 0, .Y = 0 },
+                .wAttributes = 0,
+                .srWindow = .{ .Left = 0, .Top = 0, .Right = 0, .Bottom = 0 },
+                .dwMaximumWindowSize = .{ .X = 0, .Y = 0 },
+            };
+
+            if (std.os.windows.kernel32.GetConsoleScreenBufferInfo(self.win, &info) == 0) {
+                switch (std.os.windows.kernel32.GetLastError()) {
+                    else => |e| return std.os.windows.unexpectedError(e),
+                }
+            }
+
+            return .{
+                .height = @intCast(info.srWindow.Bottom - info.srWindow.Top + 1),
+                .width = @intCast(info.srWindow.Right - info.srWindow.Left + 1),
+            };
+        } else {
+            const TIOCGWINSZ = std.c.T.IOCGWINSZ;
+            const winsz = std.c.winsize{ .col = 0, .row = 0, .xpixel = 0, .ypixel = 0 };
+
+            if (winsz.row == 0 or winsz.col == 0) {
+                var lldb_winsz = std.c.winsize{ .col = 0, .row = 0, .xpixel = 0, .ypixel = 0 };
+                const lldb_rv = std.os.linux.ioctl(self.nix.handle, TIOCGWINSZ, @intFromPtr(&lldb_winsz));
+                const lldb_err = std.posix.errno(lldb_rv);
+
+                if (lldb_rv >= 0) {
+                    return .{ .height = lldb_winsz.row, .width = lldb_winsz.col };
+                } else {
+                    return std.posix.unexpectedErrno(lldb_err);
+                }
+            } else {
+                return .{ .height = winsz.row, .width = winsz.col };
+            }
+        }
+    }
+
+    pub fn deinit(self: *const Tty) void {
+        if (windows) {} else {
+            self.nix.close();
+        }
+    }
 };
 
 const AnsiEscapeCodes = struct {
@@ -88,46 +167,6 @@ fn parseArgs(alloc: std.mem.Allocator) !void {
     }
 }
 
-fn getTerminalSize() !TermSize {
-    if (windows) {
-        var info: std.os.windows.CONSOLE_SCREEN_BUFFER_INFO = .{
-            .dwSize = .{ .X = 0, .Y = 0 },
-            .dwCursorPosition = .{ .X = 0, .Y = 0 },
-            .wAttributes = 0,
-            .srWindow = .{ .Left = 0, .Top = 0, .Right = 0, .Bottom = 0 },
-            .dwMaximumWindowSize = .{ .X = 0, .Y = 0 },
-        };
-
-        if (std.os.windows.kernel32.GetConsoleScreenBufferInfo(tty_win, &info) == 0) {
-            switch (std.os.windows.kernel32.GetLastError()) {
-                else => |e| return std.os.windows.unexpectedError(e),
-            }
-        }
-
-        return .{
-            .height = @intCast(info.srWindow.Bottom - info.srWindow.Top + 1),
-            .width = @intCast(info.srWindow.Right - info.srWindow.Left + 1),
-        };
-    } else {
-        const TIOCGWINSZ = std.c.T.IOCGWINSZ;
-        const winsz = std.c.winsize{ .col = 0, .row = 0, .xpixel = 0, .ypixel = 0 };
-
-        if (winsz.row == 0 or winsz.col == 0) {
-            var lldb_winsz = std.c.winsize{ .col = 0, .row = 0, .xpixel = 0, .ypixel = 0 };
-            const lldb_rv = std.os.linux.ioctl(tty_nix.handle, TIOCGWINSZ, @intFromPtr(&lldb_winsz));
-            const lldb_err = std.posix.errno(lldb_rv);
-
-            if (lldb_rv >= 0) {
-                return .{ .height = lldb_winsz.row, .width = lldb_winsz.col };
-            } else {
-                return std.posix.unexpectedErrno(lldb_err);
-            }
-        } else {
-            return .{ .height = winsz.row, .width = winsz.col };
-        }
-    }
-}
-
 fn deallocateMatrix(alloc: std.mem.Allocator, mat: [][]Matrix) void {
     for (mat) |row| {
         alloc.free(row);
@@ -173,7 +212,7 @@ fn initializeColumns(alloc: std.mem.Allocator, width: u32, height: u32) !void {
     }
 }
 
-fn renderFrame(alloc: std.mem.Allocator, term_size: TermSize, buffer: *std.ArrayList(u8)) !void {
+fn renderFrame(alloc: std.mem.Allocator, term_size: TtySize, buffer: *std.ArrayList(u8)) !void {
     buffer.clearRetainingCapacity();
 
     for (1..term_size.height + 1) |i| {
@@ -201,7 +240,7 @@ fn renderFrame(alloc: std.mem.Allocator, term_size: TermSize, buffer: *std.Array
     }
 }
 
-fn renderFrameDiff(alloc: std.mem.Allocator, term_size: TermSize, buffer: *std.ArrayList(u8)) !void {
+fn renderFrameDiff(alloc: std.mem.Allocator, term_size: TtySize, buffer: *std.ArrayList(u8)) !void {
     buffer.clearRetainingCapacity();
 
     for (1..term_size.height + 1) |i| {
@@ -239,8 +278,8 @@ fn copyMatrix(src: [][]Matrix, dst: [][]Matrix) void {
     }
 }
 
-fn checkResize(alloc: std.mem.Allocator) !bool {
-    const new_size = try getTerminalSize();
+fn checkResize(alloc: std.mem.Allocator, tty: *const Tty) !bool {
+    const new_size = try tty.getSize();
     if (new_size.width != current_size.width or new_size.height != current_size.height) {
         if (current_size.width > 0) {
             deallocateMatrix(alloc, matrix);
@@ -326,28 +365,6 @@ fn handle_keypress(key: u8) void {
     }
 }
 
-fn setupTty() !void {
-    if (windows) {} else {
-        const original_termios = try std.posix.tcgetattr(tty_nix.handle);
-        var raw = original_termios;
-
-        raw.lflag.ECHO = false;
-        raw.lflag.ICANON = false;
-        raw.lflag.IEXTEN = false;
-        raw.iflag.IXON = false;
-        raw.iflag.ICRNL = false;
-        raw.iflag.BRKINT = false;
-        raw.iflag.INPCK = false;
-        raw.iflag.ISTRIP = false;
-        raw.oflag.OPOST = false;
-        raw.cflag.CSIZE = .CS8;
-        raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-        raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-
-        try std.posix.tcsetattr(tty_nix.handle, .FLUSH, raw);
-    }
-}
-
 pub fn main() !void {
     const alloc = gpa.allocator();
     try parseArgs(alloc);
@@ -377,28 +394,20 @@ pub fn main() !void {
     });
     rand = prng.random();
 
-    if (!windows) {
-        tty_nix = try std.fs.cwd().openFile("/dev/tty", .{});
-    }
-    defer {
-        if (!windows) {
-            tty_nix.close();
-        }
-    }
+    const tty = try Tty.init();
+    defer tty.deinit();
 
-    try setupTty();
-    const term_size = try getTerminalSize();
+    current_size = try tty.getSize();
 
-    buf = try alloc.alloc(u8, term_size.width * term_size.height * 4);
+    buf = try alloc.alloc(u8, current_size.width * current_size.height * 4);
     stdout_writer = std.fs.File.stdout().writer(buf);
 
-    current_size = try getTerminalSize();
     matrix = try allocateMatrix(alloc, current_size.width, current_size.height);
     prev_matrix = try allocateMatrix(alloc, current_size.width, current_size.height);
 
     for (matrix, prev_matrix) |*row, *prev_row| {
-        row.* = try alloc.alloc(Matrix, term_size.width);
-        prev_row.* = try alloc.alloc(Matrix, term_size.width);
+        row.* = try alloc.alloc(Matrix, current_size.width);
+        prev_row.* = try alloc.alloc(Matrix, current_size.width);
 
         for (row.*, prev_row.*) |*cell, *prev_cell| {
             cell.* = .{ .is_head = false, .val = -1, .color = 0 };
@@ -421,7 +430,7 @@ pub fn main() !void {
     var use_diff_rendering = false;
 
     while (true) {
-        const resized = try checkResize(alloc);
+        const resized = try checkResize(alloc, &tty);
         if (resized) {
             use_diff_rendering = false;
         }
