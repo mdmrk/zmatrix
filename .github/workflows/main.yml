@@ -53,7 +53,7 @@ jobs:
           BUILD_DATE: ${{needs.build-info.outputs.date}}
           COMMIT_HASH: ${{needs.build-info.outputs.commit_hash}}
         run: |
-          zig build -Dtarget=${{ matrix.target.arch }}-${{ matrix.target.os }} -Doptimize=ReleaseSafe -Dcpu=baseline
+          zig build -Dtarget=${{ matrix.target.arch }}-${{ matrix.target.os }} -Doptimize=ReleaseDebug -Dcpu=baseline
         shell: bash
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
