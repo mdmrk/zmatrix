@@ -19,6 +19,7 @@ var lengths: []u32 = &.{};
 var updates: []u32 = &.{};
 var current_size: TtySize = .{ .width = 0, .height = 0 };
 var update_time: u64 = 40_000_000;
+var should_stop = std.atomic.Value(bool).init(false);
 
 var args: struct {
     help: bool = false,
@@ -39,13 +40,12 @@ const TtySize = struct {
 };
 
 const Tty = struct {
-    win: std.os.windows.HANDLE = undefined,
-    nix: std.fs.File = undefined,
+    stdin: std.fs.File = undefined,
 
     pub fn init() !Tty {
         if (windows) {
             return .{
-                .win = std.fs.File.stdin().handle,
+                .stdin = std.fs.File.stdin(),
             };
         } else {
             const tty_nix = try std.fs.cwd().openFile("/dev/tty", .{});
@@ -67,7 +67,7 @@ const Tty = struct {
 
             try std.posix.tcsetattr(tty_nix.handle, .FLUSH, raw);
             return .{
-                .nix = tty_nix,
+                .stdin = tty_nix,
             };
         }
     }
@@ -82,7 +82,7 @@ const Tty = struct {
                 .dwMaximumWindowSize = .{ .X = 0, .Y = 0 },
             };
 
-            if (std.os.windows.kernel32.GetConsoleScreenBufferInfo(self.win, &info) == 0) {
+            if (std.os.windows.kernel32.GetConsoleScreenBufferInfo(self.stdin.handle, &info) == 0) {
                 switch (std.os.windows.kernel32.GetLastError()) {
                     else => |e| return std.os.windows.unexpectedError(e),
                 }
@@ -98,7 +98,7 @@ const Tty = struct {
 
             if (winsz.row == 0 or winsz.col == 0) {
                 var lldb_winsz = std.c.winsize{ .col = 0, .row = 0, .xpixel = 0, .ypixel = 0 };
-                const lldb_rv = std.os.linux.ioctl(self.nix.handle, TIOCGWINSZ, @intFromPtr(&lldb_winsz));
+                const lldb_rv = std.os.linux.ioctl(self.stdin.handle, TIOCGWINSZ, @intFromPtr(&lldb_winsz));
                 const lldb_err = std.posix.errno(lldb_rv);
 
                 if (lldb_rv >= 0) {
@@ -113,9 +113,7 @@ const Tty = struct {
     }
 
     pub fn deinit(self: *const Tty) void {
-        if (windows) {} else {
-            self.nix.close();
-        }
+        self.stdin.close();
     }
 };
 
@@ -329,108 +327,16 @@ fn getch() !u8 {
     return error.NoInput;
 }
 
-fn handle_keypress(key: u8) void {
-    switch (key) {
-        '0' => {
-            update_time = 4_000;
-        },
-        '1' => {
-            update_time = 4_000_0;
-        },
-        '2' => {
-            update_time = 4_000_00;
-        },
-        '3' => {
-            update_time = 4_000_000;
-        },
-        '4' => {
-            update_time = 4_000_000_0;
-        },
-        '5' => {
-            update_time = 4_000_000_00;
-        },
-        '6' => {
-            update_time = 4_000_000_000;
-        },
-        '7' => {
-            update_time = 4_000_000_000_0;
-        },
-        '8' => {
-            update_time = 4_000_000_000_00;
-        },
-        '9' => {
-            update_time = 4_000_000_000_000;
-        },
-        else => {},
-    }
-}
-
-pub fn main() !void {
-    const alloc = gpa.allocator();
-    try parseArgs(alloc);
-
-    if (args.help) {
-        std.debug.print(
-            \\zmatrix - Matrix on the terminal
-            \\
-            \\Usage: zmatrix [options]
-            \\
-            \\    Options:
-            \\        --version, -v   Print version string
-            \\        --help, -h      Print this message
-            \\
-        , .{});
-        return;
-    }
-    if (args.version) {
-        print("{s}\n", .{zmatrix_options.version});
-        return;
-    }
-
-    prng = std.Random.DefaultPrng.init(blk: {
-        var seed: u64 = undefined;
-        try std.posix.getrandom(std.mem.asBytes(&seed));
-        break :blk seed;
-    });
-    rand = prng.random();
-
-    const tty = try Tty.init();
-    defer tty.deinit();
-
-    current_size = try tty.getSize();
-
-    buf = try alloc.alloc(u8, current_size.width * current_size.height * 4);
-    stdout_writer = std.fs.File.stdout().writer(buf);
-
-    matrix = try allocateMatrix(alloc, current_size.width, current_size.height);
-    prev_matrix = try allocateMatrix(alloc, current_size.width, current_size.height);
-
-    for (matrix, prev_matrix) |*row, *prev_row| {
-        row.* = try alloc.alloc(Matrix, current_size.width);
-        prev_row.* = try alloc.alloc(Matrix, current_size.width);
-
-        for (row.*, prev_row.*) |*cell, *prev_cell| {
-            cell.* = .{ .is_head = false, .val = -1, .color = 0 };
-            prev_cell.* = .{ .is_head = false, .val = -1, .color = 0 };
-        }
-    }
-
-    try initializeColumns(alloc, current_size.width, current_size.height);
-
-    print("{s}", .{AnsiEscapeCodes.term_on});
-    defer print("{s}", .{AnsiEscapeCodes.term_off});
-
+fn main_loop(alloc: std.mem.Allocator, tty: *const Tty) !void {
     const randmin = 33;
     const randnum = 90;
-
+    var count: u32 = 0;
+    var use_diff_rendering = false;
     var frame_buffer = try std.ArrayList(u8).initCapacity(alloc, 0);
     defer frame_buffer.deinit(alloc);
 
-    var count: u32 = 0;
-    var use_diff_rendering = false;
-
-    while (true) {
-        const resized = try checkResize(alloc, &tty);
+    while (!should_stop.load(.acquire)) {
+        const resized = try checkResize(alloc, tty);
         if (resized) {
             use_diff_rendering = false;
         }
@@ -438,18 +344,9 @@ pub fn main() !void {
         count += 1;
         if (count > 4) count = 1;
 
-        if (kbhit()) {
-            const key = getch() catch continue;
-            if (key == 'q' or key == 'Q') {
-                break;
-            }
-            handle_keypress(key);
-        }
-
         if (use_diff_rendering) {
             copyMatrix(matrix, prev_matrix);
         }
-
         var j: u32 = 0;
         while (j <= current_size.width - 1) : (j += 2) {
             if (count > updates[j]) continue;
@@ -509,5 +406,89 @@ pub fn main() !void {
         try stdout_writer.interface.flush();
 
         std.Thread.sleep(update_time);
+    }
+}
+
+pub fn main() !void {
+    const alloc = gpa.allocator();
+    try parseArgs(alloc);
+
+    if (args.help) {
+        std.debug.print(
+            \\zmatrix - Matrix on the terminal
+            \\
+            \\Usage: zmatrix [options]
+            \\
+            \\    Options:
+            \\        --version, -v   Print version string
+            \\        --help, -h      Print this message
+            \\
+        , .{});
+        return;
+    }
+    if (args.version) {
+        print("{s}\n", .{zmatrix_options.version});
+        return;
+    }
+
+    prng = std.Random.DefaultPrng.init(blk: {
+        var seed: u64 = undefined;
+        try std.posix.getrandom(std.mem.asBytes(&seed));
+        break :blk seed;
+    });
+    rand = prng.random();
+
+    const tty = try Tty.init();
+    defer tty.deinit();
+
+    current_size = try tty.getSize();
+
+    buf = try alloc.alloc(u8, current_size.width * current_size.height * 4);
+    stdout_writer = std.fs.File.stdout().writer(buf);
+
+    matrix = try allocateMatrix(alloc, current_size.width, current_size.height);
+    prev_matrix = try allocateMatrix(alloc, current_size.width, current_size.height);
+
+    for (matrix, prev_matrix) |*row, *prev_row| {
+        row.* = try alloc.alloc(Matrix, current_size.width);
+        prev_row.* = try alloc.alloc(Matrix, current_size.width);
+
+        for (row.*, prev_row.*) |*cell, *prev_cell| {
+            cell.* = .{ .is_head = false, .val = -1, .color = 0 };
+            prev_cell.* = .{ .is_head = false, .val = -1, .color = 0 };
+        }
+    }
+
+    try initializeColumns(alloc, current_size.width, current_size.height);
+
+    print("{s}", .{AnsiEscapeCodes.term_on});
+    defer print("{s}", .{AnsiEscapeCodes.term_off});
+
+    const thread = try std.Thread.spawn(.{}, main_loop, .{ alloc, &tty });
+
+    while (true) {
+        if (kbhit()) {
+            const key = getch() catch continue;
+
+            switch (key) {
+                '0' => update_time = 4_000,
+                '1' => update_time = 40_000,
+                '2' => update_time = 400_000,
+                '3' => update_time = 1_000_000,
+                '4' => update_time = 4_000_000,
+                '5' => update_time = 20_000_000,
+                '6' => update_time = 50_000_000,
+                '7' => update_time = 100_000_000,
+                '8' => update_time = 500_000_000,
+                '9' => update_time = 1_000_000_000,
+                'q', 'Q' => {
+                    should_stop.store(true, .release);
+                    thread.join();
+                    break;
+                },
+                else => {},
+            }
+        }
+        std.Thread.sleep(10_000_000);
     }
 }
