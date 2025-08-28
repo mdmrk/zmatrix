@@ -24,6 +24,7 @@ var args: struct {
     help: bool = false,
     version: bool = false,
     update_time: u64 = getUpdateTime('5'),
+    classic: bool = false,
 } = .{};
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -161,6 +162,8 @@ fn parseArgs(alloc: std.mem.Allocator) !void {
             args.help = true;
         } else if (S.checkArg(arg, "-v", "--version")) {
             args.version = true;
+        } else if (S.checkArg(arg, "-c", "--classic")) {
+            args.classic = true;
         } else if (S.checkArg(arg, "-d", "--delay")) {
             const delay = args_it.next() orelse return error.NoDelay;
             args.update_time = getUpdateTime(delay[0]);
@@ -231,7 +234,14 @@ fn renderFrame(alloc: std.mem.Allocator, term_size: TtySize, buffer: *std.ArrayL
                     try buffer.appendSlice(alloc, AnsiEscapeCodes.color_green);
                 }
 
-                try buffer.append(alloc, @as(u8, @intCast(cell.val)));
+                if (cell.val <= 127) {
+                    try buffer.append(alloc, @as(u8, @intCast(cell.val)));
+                } else {
+                    var utf8_buf: [4]u8 = undefined;
+                    const len = try std.unicode.utf8Encode(@as(u21, @intCast(cell.val)), &utf8_buf);
+                    try buffer.appendSlice(alloc, utf8_buf[0..len]);
+                }
+
                 try buffer.appendSlice(alloc, AnsiEscapeCodes.color_def);
             }
         }
@@ -263,7 +273,14 @@ fn renderFrameDiff(alloc: std.mem.Allocator, term_size: TtySize, buffer: *std.Ar
                         try buffer.appendSlice(alloc, AnsiEscapeCodes.color_green);
                     }
 
-                    try buffer.append(alloc, @as(u8, @intCast(curr.val)));
+                    if (curr.val <= 127) {
+                        try buffer.append(alloc, @as(u8, @intCast(curr.val)));
+                    } else {
+                        var utf8_buf: [4]u8 = undefined;
+                        const len = try std.unicode.utf8Encode(@as(u21, @intCast(curr.val)), &utf8_buf);
+                        try buffer.appendSlice(alloc, utf8_buf[0..len]);
+                    }
+
                     try buffer.appendSlice(alloc, AnsiEscapeCodes.color_def);
                 }
             }
@@ -331,10 +348,13 @@ fn getChar() !u8 {
 }
 
 fn main_loop(alloc: std.mem.Allocator, tty: *const Tty) !void {
-    const randmin = 33;
-    const randnum = 90;
+    const randmin: u32 = if (args.classic) 0xff66 else 33;
+    const randmax: u32 = if (args.classic) 0xff9d else 90;
+    const randnum = randmax - randmin;
+
     var count: u32 = 0;
     var use_diff_rendering = false;
+
     var frame_buffer = try std.ArrayList(u8).initCapacity(alloc, 0);
     defer frame_buffer.deinit(alloc);
 
@@ -442,6 +462,7 @@ pub fn main() !void {
             \\        --version, -v       Print version string
             \\        --help, -h          Print this message
             \\        --delay, -d time    Set update time (0 .. 9)
+            \\        --classic, -c       Use japanese characters
             \\
         , .{});
         return;
@@ -468,16 +489,6 @@ pub fn main() !void {
 
     matrix = try allocateMatrix(alloc, current_size.width, current_size.height);
     prev_matrix = try allocateMatrix(alloc, current_size.width, current_size.height);
-
-    for (matrix, prev_matrix) |*row, *prev_row| {
-        row.* = try alloc.alloc(Matrix, current_size.width);
-        prev_row.* = try alloc.alloc(Matrix, current_size.width);
-
-        for (row.*, prev_row.*) |*cell, *prev_cell| {
-            cell.* = .{ .is_head = false, .val = -1, .color = 0 };
-            prev_cell.* = .{ .is_head = false, .val = -1, .color = 0 };
-        }
-    }
 
     try initializeColumns(alloc, current_size.width, current_size.height);
 
