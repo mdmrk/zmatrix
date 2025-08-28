@@ -18,12 +18,12 @@ var spaces: []u32 = &.{};
 var lengths: []u32 = &.{};
 var updates: []u32 = &.{};
 var current_size: TtySize = .{ .width = 0, .height = 0 };
-var update_time: u64 = 40_000_000;
 var should_stop = std.atomic.Value(bool).init(false);
 
 var args: struct {
     help: bool = false,
     version: bool = false,
+    update_time: u64 = getUpdateTime('5'),
 } = .{};
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -161,6 +161,9 @@ fn parseArgs(alloc: std.mem.Allocator) !void {
             args.help = true;
         } else if (S.checkArg(arg, "-v", "--version")) {
             args.version = true;
+        } else if (S.checkArg(arg, "-d", "--delay")) {
+            const delay = args_it.next() orelse return error.NoDelay;
+            args.update_time = getUpdateTime(delay[0]);
         }
     }
 }
@@ -405,8 +408,24 @@ fn main_loop(alloc: std.mem.Allocator, tty: *const Tty) !void {
         _ = try stdout_writer.interface.write(frame_buffer.items);
         try stdout_writer.interface.flush();
 
-        std.Thread.sleep(update_time);
+        std.Thread.sleep(args.update_time);
     }
+}
+
+fn getUpdateTime(n: u8) u64 {
+    return switch (n) {
+        '0' => 4_000,
+        '1' => 40_000,
+        '2' => 400_000,
+        '3' => 1_000_000,
+        '4' => 4_000_000,
+        '5' => 20_000_000,
+        '6' => 50_000_000,
+        '7' => 100_000_000,
+        '8' => 500_000_000,
+        '9' => 1_000_000_000,
+        else => args.update_time,
+    };
 }
 
 pub fn main() !void {
@@ -420,8 +439,9 @@ pub fn main() !void {
             \\Usage: zmatrix [options]
             \\
             \\    Options:
-            \\        --version, -v   Print version string
-            \\        --help, -h      Print this message
+            \\        --version, -v       Print version string
+            \\        --help, -h          Print this message
+            \\        --delay, -d time    Set update time (0 .. 9)
             \\
         , .{});
         return;
@@ -471,16 +491,9 @@ pub fn main() !void {
             const key = getch() catch continue;
 
             switch (key) {
-                '0' => update_time = 4_000,
-                '1' => update_time = 40_000,
-                '2' => update_time = 400_000,
-                '3' => update_time = 1_000_000,
-                '4' => update_time = 4_000_000,
-                '5' => update_time = 20_000_000,
-                '6' => update_time = 50_000_000,
-                '7' => update_time = 100_000_000,
-                '8' => update_time = 500_000_000,
-                '9' => update_time = 1_000_000_000,
+                '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' => {
+                    args.update_time = getUpdateTime(key);
+                },
                 'q', 'Q' => {
                     should_stop.store(true, .release);
                     thread.join();
