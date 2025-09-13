@@ -321,19 +321,6 @@ fn checkResize(alloc: std.mem.Allocator, tty: *const Tty) !bool {
     return false;
 }
 
-fn keyboardHit() bool {
-    const fd = if (windows)
-        @as(std.os.windows.ws2_32.SOCKET, @ptrCast(std.os.windows.kernel32.GetStdHandle(std.os.windows.STD_INPUT_HANDLE)))
-    else
-        std.posix.STDIN_FILENO;
-    const fds: std.posix.pollfd = .{
-        .fd = fd,
-        .events = std.posix.POLL.IN,
-        .revents = 0,
-    };
-    return std.posix.poll(@constCast(&[_]std.posix.pollfd{fds}), 0) catch 0 > 0;
-}
-
 fn getChar() !u8 {
     var buffer: [1]u8 = undefined;
     const fd = if (windows)
@@ -498,21 +485,19 @@ pub fn main() !void {
     const thread = try std.Thread.spawn(.{}, main_loop, .{ alloc, &tty });
 
     while (true) {
-        if (keyboardHit()) {
-            const key = getChar() catch continue;
+        const key = getChar() catch continue;
 
-            switch (key) {
-                '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' => {
-                    args.update_time = getUpdateTime(key);
-                },
-                'q', 'Q', 27 => {
-                    should_stop.store(true, .release);
-                    thread.join();
-                    break;
-                },
-                else => {},
-            }
+        switch (key) {
+            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' => {
+                args.update_time = getUpdateTime(key);
+            },
+            'q', 'Q', 27 => {
+                should_stop.store(true, .release);
+                thread.join();
+                break;
+            },
+            else => {},
         }
-        std.Thread.sleep(10_000_000);
     }
+    std.Thread.sleep(10_000_000);
 }
