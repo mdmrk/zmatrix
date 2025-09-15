@@ -23,8 +23,9 @@ var should_stop = std.atomic.Value(bool).init(false);
 var args: struct {
     help: bool = false,
     version: bool = false,
-    update_time: u64 = getUpdateTime('5'),
+    update_time: u64 = getUpdateTime('6'),
     classic: bool = false,
+    lambda: bool = false,
 } = .{};
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -164,6 +165,8 @@ fn parseArgs(alloc: std.mem.Allocator) !void {
             args.version = true;
         } else if (S.checkArg(arg, "-c", "--classic")) {
             args.classic = true;
+        } else if (S.checkArg(arg, "-l", "--lambda")) {
+            args.lambda = true;
         } else if (S.checkArg(arg, "-d", "--delay")) {
             const delay = args_it.next() orelse return error.NoDelay;
             args.update_time = getUpdateTime(delay[0]);
@@ -335,8 +338,8 @@ fn getChar() !u8 {
 }
 
 fn main_loop(alloc: std.mem.Allocator, tty: *const Tty) !void {
-    const randmin: u32 = if (args.classic) 0xff66 else 33;
-    const randmax: u32 = if (args.classic) 0xff9d else 90;
+    const randmin: u32 = if (args.classic) 0xff66 else if (args.lambda) 0x03bb else 33;
+    const randmax: u32 = if (args.classic) 0xff9d else if (args.lambda) 0x03bc else 90;
     const randnum = randmax - randmin;
 
     var count: u32 = 0;
